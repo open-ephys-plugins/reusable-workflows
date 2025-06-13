@@ -1,0 +1,65 @@
+# Reusable workflow to verify that the version in a file has increased
+# compared to the previous tag.
+
+name: Verify Version Increase
+
+on:
+  workflow_call:
+    outputs:
+      version-increased:
+        description: "Returns 'true' if the version has increased or if it's the first tag."
+        value: ${{ jobs.verify.outputs.version-increased }}
+      current-version:
+        description: "The version string found in the current commit's file."
+        value: ${{ jobs.verify.outputs.current-version }}
+
+jobs:
+  verify:
+    name: Verify Version
+    runs-on: ubuntu-latest
+    outputs:
+      version-increased: ${{ steps.check.outputs.deploy_allowed }}
+      current-version: ${{ steps.check.outputs.current_version }}
+    steps:
+      - name: Check out code with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required to access all tags
+
+      - name: Check semantic version
+        id: check
+        run: |
+          VERSION_REGEX='[0-9]+\.[0-9]+\.[0-9]+'
+          
+          # Extract version from the specified file in the current commit
+          CURRENT_VERSION=$(grep -w Source/OpenEphysLib.cpp -e 'info->libVersion' | grep -Eo "$VERSION_REGEX")
+          if [ -z "$CURRENT_VERSION" ]; then
+              echo "::error::Could not extract version from OpenEphysLib.cpp."
+              exit 1
+          fi
+          
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+          
+          # If there's only one tag, it's the first release, so allow deployment
+          if [ $(git tag | wc -l) -lt 2 ]; then
+            echo "This is the first tag. Proceeding with deployment."
+            echo "deploy_allowed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Find the previous tag and get its version of the file
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 ${{ github.ref_name }}^)
+          PREVIOUS_VERSION=$(git show ${PREVIOUS_TAG}:Source/OpenEphysLib.cpp | grep -e 'info->libVersion' | grep -Eo "$VERSION_REGEX")
+          
+          echo "Current version: $CURRENT_VERSION"
+          echo "Previous version: $PREVIOUS_VERSION"
+          
+          # Compare the versions; fail if the new version is not strictly greater
+          if [ "$(printf '%s\n%s\n' "$PREVIOUS_VERSION" "$CURRENT_VERSION" | sort -V | tail -n1)" = "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+            echo "Version check passed. New version is higher."
+            echo "deploy_allowed=true" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Version check failed: Current version ($CURRENT_VERSION) is not greater than previous version ($PREVIOUS_VERSION)."
+            echo "deploy_allowed=false" >> $GITHUB_OUTPUT
+            exit 1 # Fail the step to make the outcome clear
+          fi
